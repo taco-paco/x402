@@ -33,16 +33,18 @@ sequenceDiagram
     C->>P: Request
     P-->>C: PaymentRequired(job-escrow)
 
-    C->>E: createJob(provider, evaluator, ...)
+    C->>E: createJob
     E-->>C: jobId
 
     C->>C: sign FundAuthorization
-    C->>P: PaymentPayload(jobId, FundAuthorization)
+    C->>P: PaymentPayload with jobId and FundAuthorization
 
-    P->>P: validate job locally; sign SetBudgetAuthorization [, SetPayoutReceiverAuthorization]
-    P->>F: settle(completed payload)
+    P->>P: validate job locally and sign SetBudgetAuthorization
+    P->>F: settle fund with completed payload
 
-    F->>E: [setPayoutReceiverWithAuthorization]
+    opt payout receiver requested
+        F->>E: setPayoutReceiverWithAuthorization
+    end
     F->>E: setBudgetWithAuthorization
     F->>E: fundWithAuthorization
     E-->>F: Funded
@@ -51,79 +53,43 @@ sequenceDiagram
     P->>P: Perform work
 
     P->>P: sign SubmitAuthorization
-    P->>F: settle(submit)
-    F->>E: submitWithAuthorization(deliverable)
+    P->>F: settle submit
+    F->>E: submitWithAuthorization
     E-->>F: Submitted
     F-->>P: success
 
-    P-->>C: Resource + deliverable commitment
+    P-->>C: Resource
 
-    V->>E: complete / reject
+    V->>E: complete or reject
 ```
 
 ## Escrow profile
 
-A facilitator relays only into escrows it has admitted, and admission is against a **profile**: the exact contract surface this binding calls and reads. This version defines one profile, `job-escrow-evm-1`. The ERC-8183 reference implementation (`ERC8183WithAuthorization` in the standard's reference repository) satisfies it.
+A facilitator relays only into escrows it has admitted, and admission is against a **profile**: the contract surface this binding calls and reads. This version defines one profile, `job-escrow-evm-1`. The ERC-8183 reference implementation satisfies it.
 
-An escrow satisfies `job-escrow-evm-1` when all of the following hold.
+An escrow satisfies `job-escrow-evm-1` when it implements [ERC-8183](https://eips.ethereum.org/EIPS/eip-8183) — the job state machine, roles, core functions, claim settlement, and events as that specification defines them — **and** resolves the following points the standard leaves open or does not name:
 
-**Core job functions**, with ERC-8183 semantics:
+| Point | ERC-8183 | `job-escrow-evm-1` requires |
+| --- | --- | --- |
+| Signed Authorizations extension | OPTIONAL (SHOULD) | REQUIRED, with the EIP-712 domain `{ name: "ERC8183", version: "1", chainId, verifyingContract: escrow }`, the types in [EIP-712 types used](#eip-712-types-used), and nonces packed as `bytes32((uint256(uint160(signer)) << 96) \| uint256(nonce))` |
+| Hooks | OPTIONAL | REQUIRED: `createJob` reverts for a non-whitelisted hook, and `address(0)` is whitelisted |
+| Claim settlement | defined; some behaviour implementation-dependent | REQUIRED: `rejectClaim` callable by the client; `submit` and terminal `reject` clear a pending claim; `claimRefund` reverts while a claim is pending on a `Funded` job and is not blocked on a `Submitted` one |
+| Evaluation grace period | MAY be any length or omitted | REQUIRED to exist, so that a `Submitted` job cannot be force-refunded the moment it expires |
+| Funding balance check | SHOULD | REQUIRED: `fund` reverts unless the escrow's balance increases by exactly `budget` |
+| `JobStatus` ordinals | not fixed | `Open = 0, Funded = 1, Submitted = 2, Completed = 3, Rejected = 4, Expired = 5` |
+| Event signatures | names only | `BudgetSet(jobId, token, amount)`, `PayoutReceiverSet(jobId, payoutReceiver)`, `JobFunded(jobId, client, amount)`, `JobSubmitted(jobId, provider, deliverable)`, `JobCompleted(jobId, evaluator, reason)`, `JobRejected(jobId, rejector, reason)`, `JobExpired(jobId)`, `PaymentReleased(jobId, recipient, amount)`, `Refunded(jobId, client, amount)`, with `jobId` topic-indexed |
 
-```
-createJob(address provider, address evaluator, uint48 expiredAt, string description, address hook, uint256 providerAgentId) returns (uint256)
-complete(uint256 jobId, bytes32 reason, bytes optParams)
-reject(uint256 jobId, bytes32 reason, bytes optParams)
-claimRefund(uint256 jobId)
-```
-
-`createJob` MUST revert when `hook` is not whitelisted (`address(0)` MUST be whitelisted), when `provider == evaluator`, when `msg.sender == provider`, or when `expiredAt` is less than five minutes ahead. `complete` MUST be callable only by `job.evaluator` while `Submitted`, MUST move the job to `Completed`, and MUST distribute the unsettled remainder to the provider-side payout recipient (`payoutReceiver`, else `provider`) less any configured platform and evaluator fees. `reject` MUST be callable by the client or the provider while `Open`, and only by `job.evaluator` while `Funded` or `Submitted`; it MUST move the job to `Rejected` and refund the unsettled remainder to the client. `claimRefund` MUST be permissionless, MUST NOT be hookable, and MUST move the job to `Expired` and refund the unsettled remainder after `expiredAt` (`Funded`) or after `expiredAt + EVALUATION_GRACE_PERIOD` (`Submitted`).
-
-**Claim settlement**, with ERC-8183 semantics, callable directly on the job but not exposed as x402 operations:
-
-```
-submitClaim(uint256 jobId, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)
-settleClaim(uint256 jobId, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)
-approveClaim(uint256 jobId, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)
-rejectClaim(uint256 jobId, uint256 cumulativeAmount, bytes32 deliverable, bytes32 reason, bytes optParams)
-```
-
-`rejectClaim` MUST be callable by the client; `submit` and terminal `reject` MUST clear a pending claim; `claimRefund` MUST revert while a claim is pending on a `Funded` job and MUST NOT be blocked by claims on a `Submitted` one; every payout and refund applies to `budget - settledAmount`. See [Claim settlement and liveness](#claim-settlement-and-liveness).
-
-**Signed Authorizations**, as `*WithAuthorization` variants taking the original parameters plus `Authorization { address signer; uint72 nonce; uint256 deadline; bytes sig; }`, verifying with ERC-1271 support, marking the nonce used before verification, reverting on a used nonce or a passed deadline, and executing with `signer` as the acting party:
+and exposes the **views** this binding reads. ERC-8183 specifies the job's fields and the escrow's allowlists but not how they are read; the reference implementation exposes them as public state, and the profile fixes those accessors:
 
 ```
-setPayoutReceiverWithAuthorization(uint256 jobId, address payoutReceiver, Authorization auth)
-setBudgetWithAuthorization(uint256 jobId, address token, uint256 amount, bytes optParams, Authorization auth)
-fundWithAuthorization(uint256 jobId, address expectedToken, uint256 expectedBudget, bytes optParams, Authorization auth)
-submitWithAuthorization(uint256 jobId, bytes32 deliverable, bytes optParams, Authorization auth)
-cancelAuthorization(uint72 nonce)
-```
-
-with the EIP-712 domain `{ name: "ERC8183", version: "1", chainId, verifyingContract: escrow }` and the types in [EIP-712 types used](#eip-712-types-used). Nonces MUST be packed as `bytes32((uint256(uint160(signer)) << 96) | uint256(nonce))`.
-
-**Views**:
-
-```
-jobCounter() returns (uint256)
 getJob(uint256 jobId) returns (Job)        // client, status, provider, expiredAt, evaluator, submittedAt, budget, hook, paymentToken, providerAgentId, description, settledAmount, payoutReceiver
 whitelistedHooks(address) returns (bool)
 allowedPaymentTokens(address) returns (bool)
 authorizationNonceUsed(bytes32) returns (bool)
-pendingClaimHash(uint256 jobId) returns (bytes32)
 paused() returns (bool)
-EVALUATION_GRACE_PERIOD() returns (uint256)
-platformFeeBP() returns (uint256)
-evaluatorFeeBP() returns (uint256)
-DOMAIN_SEPARATOR() returns (bytes32)
 ```
 
-with `JobStatus` enumerated `Open = 0, Funded = 1, Submitted = 2, Completed = 3, Rejected = 4, Expired = 5`.
-
-**Funding semantics**: `fund` MUST revert unless `job.paymentToken == expectedToken` and `job.budget == expectedBudget`, MUST pull exactly `budget` from the client, and MUST revert if the escrow's balance does not increase by exactly that amount.
-
-**Events**: `BudgetSet(jobId, token, amount)`, `PayoutReceiverSet(jobId, payoutReceiver)`, `JobFunded(jobId, client, amount)`, `JobSubmitted(jobId, provider, deliverable)`, `JobCompleted(jobId, evaluator, reason)`, `JobRejected(jobId, rejector, reason)`, `JobExpired(jobId)`, `PaymentReleased(jobId, recipient, amount)`, `Refunded(jobId, client, amount)`, with `jobId` topic-indexed.
-
-An escrow without claim settlement does not satisfy `job-escrow-evm-1`; a profile for such escrows would be a separate definition.
+Where this binding names an ERC-8183 function, revert, or event below, it means the one that specification defines. An escrow that omits any required point above does not satisfy `job-escrow-evm-1`; a profile for it would be a separate definition.
 
 A facilitator MUST NOT advertise an escrow under a profile it has not verified the escrow satisfies. Because a profile is checked against a deployment that may be upgradeable, admission is a review of the deployment and its admin, not of the code alone.
 
@@ -366,18 +332,25 @@ Under `escrow`, the second settle carries the server-authored `submit`:
 
 ### Deliverable
 
-`deliverable` is the `bytes32` the provider commits to on `submit`. This version fixes one derivation, so that the provider's signature over `deliverable` is a signature over the delivered content and nothing on the wire can reinterpret it:
+`deliverable` is the `bytes32` the provider commits to on `submit`. This version fixes one derivation, so that the commitment is a deterministic function of the delivered content and nothing on the wire can reinterpret it:
 
-> `deliverable = keccak256(content)`, where `content` is the octets of the resource as delivered to the client, before any transport framing.
+> `deliverable = keccak256(content)`, where `content` is the exact resource representation bytes exposed to the x402 client after transport-level decoding and before any application-level deserialization.
 
-Each x402 transport defines what those octets are. Over HTTP they are the entity body before any transfer or content coding; a resource whose delivery is not a single body (streams, empty bodies, side effects) cannot be committed under this version and MUST NOT be offered under `job-escrow`. Provider-defined derivations are a candidate for a later version; a hook's `optParams` is where a method identifier would be bound if one were introduced.
+The invariant is that the server and the client feed **identical bytes** to `keccak256`: the bytes the server hashes MUST be the bytes the client's x402 layer receives. Each x402 transport defines where that boundary is. Over HTTP it is the message body after transfer coding and content coding have been removed (so `Content-Encoding: gzip` is undone, chunking is reassembled) and before the body is parsed as JSON, text, or any other media type. A resource that cannot present one deterministic byte representation reproducible on both sides — streaming responses, side-effect-only resources, bodies that vary by connection or negotiation — MUST NOT be offered under this version's derivation. Provider-defined derivations are a candidate for a later version; a hook's `optParams` is where a method identifier would be bound if one were introduced.
 
-In both flows the provider commits **before responding**: it produces the content, hashes it, signs the `SubmitAuthorization`, and returns the content together with `deliverable` and that signed authorization under `extensions["job-escrow"]` of the response (see [SettlementResponse](#settlementresponse)). The flows differ only in when the authorization lands onchain:
+The commitment is not returned to the client as response metadata. It is a deterministic function of content the client already holds, and a server-authored copy of it would prove nothing; the only authenticated record is the onchain one. The client therefore verifies against the chain: it computes `keccak256` over the content it received and compares it with the `deliverable` in `JobSubmitted(jobId, provider, deliverable)` on the escrow. The flows differ only in when that event exists:
 
-- `escrow` — the facilitator lands it in the `submit` settle before the response is sent; `transaction` is the submit transaction and `JobSubmitted` is already emitted.
-- `upfront` — the provider lands it out of band afterwards. The client holds a commitment signed by `job.provider` from the moment it receives the response, can verify `keccak256(content) == deliverable` and the signature immediately, and later observes `JobSubmitted(jobId, provider, deliverable)`. Because a `SubmitAuthorization` is executable by anyone, a client that sees no `JobSubmitted` MAY relay `submitWithAuthorization` itself, moving the job to `Submitted` and starting evaluation rather than waiting for expiry.
+- `escrow` — before the response: the facilitator settles `submit`, and the response's `transaction` is the submit transaction, so the event is already emitted and readable from the receipt.
+- `upfront` — after the response, out of band, through the same `SubmitAuthorization` mechanism; the client observes the event when the provider submits.
 
-The client recomputes `keccak256` over the content it received and, if the two match, holds content whose commitment the provider has signed; that content is what it hands the evaluator. The evaluator needs nothing from the 402.
+The client-side rule is therefore:
+
+```
+expectedDeliverable = keccak256(content)
+expectedDeliverable ?= JobSubmitted.deliverable
+```
+
+Where the two disagree, x402 exposes the disagreement — but a mismatch does not by itself prove provider misconduct. The onchain `deliverable` is payment state: it records what the provider *submitted*. What the provider actually *returned* is a separate fact that the payment layer does not witness, and establishing it is a question of evidence available to the evaluator — TLS transcript proofs, signed application receipts, application-layer logs, zero-knowledge proofs, or whatever the parties agreed. x402 defines the derivation, funds the job, records the submitted commitment, and exposes the settlement transaction and job state; the rest is the evidence layer's.
 
 ### What the second settle finalizes
 
@@ -396,7 +369,7 @@ Both flows of this scheme omit `/verify` from their ordering: the first `/settle
 ### `fund`
 
 4. **Shape guard**: `jobId` and `fundAuthorization` present; `permit` present or `token.allowance(signer, escrow) >= amount`; `setBudgetAuthorization` present unless the budget is already set (step 7).
-5. **Job exists**: `1 <= jobId <= escrow.jobCounter()`; read `job = escrow.getJob(jobId)`.
+5. **Job exists**: read `job = escrow.getJob(jobId)`; a revert is `invalid_job_escrow_evm_job_not_found`.
 6. **Job matches the offer**: `job.client == fundAuthorization.signer`; `job.provider == payTo`; `job.evaluator` is accepted by `extra.evaluators` per [Evaluators](#evaluators); `job.hook` is accepted by `extra.hooks` per [Hooks](#hooks) and `escrow.whitelistedHooks(job.hook) == true`; `keccak256(job.description) == keccak256(resolved description)` per [Job description](#job-description); `job.providerAgentId == extra.providerAgentId`; `job.expiredAt == extra.jobExpiresAt`.
 7. **Job state**: `job.status == Open`; `now < job.expiredAt`; `job.paymentToken` is `address(0)` or `asset`; `job.budget` is `0` or `amount`.
 8. **Fund authorization**: signature recovers (ECDSA or ERC-1271) to `signer` over the `FundAuthorization` digest built from `(jobId, asset, amount, keccak256(optParams), nonce, deadline)`; `now < deadline <= job.expiredAt`; `escrow.authorizationNonceUsed(pack(signer, nonce)) == false`.
@@ -431,7 +404,7 @@ After confirmation the facilitator MUST apply the step-13 outcome checks to the 
 
 ### `submit`
 
-The facilitator submits `escrow.submitWithAuthorization(jobId, deliverable, submitAuthorization.optParams, submitAuthorization)`, confirms `JobSubmitted(jobId, payTo, deliverable)`, and returns a `SettlementResponse` with `transaction` and the `job-escrow` extension below carrying `jobId`, `deliverable`, and the `submitAuthorization` it executed.
+The facilitator submits `escrow.submitWithAuthorization(jobId, deliverable, submitAuthorization.optParams, submitAuthorization)`, confirms `JobSubmitted(jobId, payTo, deliverable)`, and returns a `SettlementResponse` with `success = true`, `transaction` = the submit transaction hash, and `network`. It adds no scheme extension.
 
 ### After settlement
 
@@ -443,69 +416,15 @@ ERC-8183 claim settlement is part of the profile and remains callable on the job
 
 - A provider MAY `submitClaim` while the job is `Funded`. A pending claim blocks `claimRefund`. The client clears it with `rejectClaim`, which the client may always call, and then `claimRefund`: for an **unhooked** job the client's refund after expiry is therefore guaranteed in at most two transactions. For a **hooked** job, a hook that reverts `rejectClaim` can keep the claim pinned and the escrow parked. This is the one path by which a hook can hold a client's funds past expiry, and the reason a client MUST vet a hook's `rejectClaim` behaviour before naming it — or name none.
 - A provider MAY `submitClaim` between `fund` and `submit`. It does not affect the x402 flow: `submit` supersedes the pending claim onchain, and the facilitator's `submit` settle needs no claim check.
+- Under `upfront` the provider submits after responding. A provider that never submits leaves the job `Funded` until `expiredAt`, when `claimRefund` returns the budget to the client. That is the provider's loss, not the client's: the client already holds the content, and the budget comes back to it. Submitting on time is the provider's only path to being paid.
 
 Partial release through claim settlement, where parties use it out of band, reduces the unsettled remainder to which terminal completion, rejection, and expiry apply.
 
 ## SettlementResponse
 
-The [`SettlementResponse`](../../x402-specification-v2.md#53-settlementresponse-schema) is the core type unchanged. Scheme-specific data travels under its `extensions` field in the standard `{ info, schema }` envelope, keyed `"job-escrow"`:
+The [`SettlementResponse`](../../x402-specification-v2.md#53-settlementresponse-schema) is the core type unchanged, and this scheme defines no extension to it. The facilitator returns the base settlement result for the operation it executed — `success`, `transaction`, `network`, `payer`, and `amount` on `fund`; `success`, `transaction`, and `network` on `submit` — and the server returns that result to the client as it is.
 
-```json
-{
-  "success": true,
-  "transaction": "0x7c21...e0a4",
-  "network": "eip155:8453",
-  "payer": "0xClientAddress",
-  "extensions": {
-    "job-escrow": {
-      "info": {
-        "jobId": "4821",
-        "deliverable": "0x3fa1...77c9",
-        "submitAuthorization": {
-          "signer": "0xProviderAddress",
-          "nonce": "0x00000000000000000abd",
-          "deadline": 1740758274,
-          "optParams": "0x",
-          "signature": "0x44d0...e6b3"
-        }
-      },
-      "schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "jobId": { "type": "string", "pattern": "^[0-9]+$" },
-          "deliverable": { "type": "string", "pattern": "^0x[a-fA-F0-9]{64}$" },
-          "submitAuthorization": {
-            "type": "object",
-            "properties": {
-              "signer": { "type": "string", "pattern": "^0x[a-fA-F0-9]{40}$" },
-              "nonce": { "type": "string", "pattern": "^0x[a-fA-F0-9]{18}$" },
-              "deadline": { "type": "integer" },
-              "optParams": { "type": "string", "pattern": "^0x([a-fA-F0-9]{2})*$" },
-              "signature": { "type": "string", "pattern": "^0x([a-fA-F0-9]{2})+$" }
-            },
-            "required": ["signer", "nonce", "deadline", "signature"]
-          }
-        },
-        "required": ["jobId"]
-      }
-    }
-  }
-}
-```
-
-| `info` field | Required | Description |
-| --- | --- | --- |
-| `jobId` | Yes | The job the settlement acted on, as a decimal string. |
-| `deliverable` | With the resource | The committed `bytes32`. |
-| `submitAuthorization` | With `deliverable` | The provider's signed `SubmitAuthorization` over `deliverable`, as sent to or to be sent to the escrow. |
-
-The facilitator's `fund` settlement carries `jobId` only; its `submit` settlement carries all three. What the client receives depends on the flow:
-
-- Under `escrow` the server's response carries the `submit` settlement's response as returned by the facilitator; `transaction` is the submit transaction and the `JobSubmitted` event in it is the authoritative record.
-- Under `upfront` the server's response carries the `fund` settlement's response, to which **the server appends** `deliverable` and `submitAuthorization` under `extensions["job-escrow"].info` before returning it; `transaction` is the fund transaction. The server MUST land the same `submitAuthorization` onchain afterwards, and the client MAY do so itself if it does not.
-
-In either case the client SHOULD recompute `keccak256` over the content, check `submitAuthorization` recovers to `payTo` over the `SubmitAuthorization` digest for `jobId` and `deliverable`, and keep the content if both hold. Over HTTP the response is the `PAYMENT-RESPONSE` header; other transports carry the `SettlementResponse` as they define.
+Under `escrow` the client receives the `submit` settlement's result, so `transaction` is the submit transaction and the `JobSubmitted` event in its receipt carries the committed `deliverable`. Under `upfront` the client receives the `fund` settlement's result, and observes `JobSubmitted` when the provider later submits. The client needs nothing else from the response: it already holds `jobId`, having created the job, and the content, having received it.
 
 ## `/supported`
 
@@ -591,9 +510,9 @@ Every reason this binding defines is namespaced `invalid_job_escrow_evm_*`; stan
 - **Refund after expiry is guaranteed for unhooked jobs**, in at most two client transactions. For hooked jobs it is subject to the hook's `rejectClaim` behaviour.
 - **The job is the offer, verified.** Because the client creates the job, every field the server relies on — provider, evaluator, hook, description, expiry — is re-read from the chain and checked against the offer before funding. A job created with other terms is refused; it cannot be funded under this offer.
 - **The server cannot reprice.** `setBudgetAuthorization` is the server's, but `fund` reverts unless the budget equals the `amount` the client signed. Payout routing via `setPayoutReceiver` is the server's own money; it does not touch what the client pays or who is accountable as `provider`.
-- **Deliverable binding.** `SubmitAuthorization` signs `deliverable`, and this version fixes `deliverable = keccak256(content)`, so the provider's signature is a signature over the content and no wire field can reinterpret it. A server that responds with one content and commits the hash of another leaves the client holding content that does not match the provider's own signature — evidence it can carry to the evaluator. Adjudicating it is the evaluator's, not x402's.
+- **Deliverable binding.** This version fixes `deliverable = keccak256(content)` over bytes both sides hold identically, so the submitted commitment is a deterministic function of content and no wire field can reinterpret it. A provider that returns one content and submits the hash of another leaves the client holding content whose hash does not match `JobSubmitted` — a disagreement x402 exposes, but does not adjudicate: the mismatch alone does not prove which side's bytes are the ones the provider returned. That attribution is application-layer evidence (TLS transcript proofs, signed receipts, logs, zero-knowledge proofs) for the evaluator; x402 does not prove it.
 - **Funding and lifecycle deadlines are separate.** `maxTimeoutSeconds` bounds the client's funding authorization and the authorizations executed atomically with it. `job.expiredAt` independently bounds the ERC-8183 lifecycle and is the latest time at which the provider may submit. Provider-authored lifecycle authorizations carry their own staleness deadlines and do not inherit the client's funding deadline.
-- **The provider commits before it responds, in both flows.** Under `upfront` the commitment is onchain only later, but the client holds the provider's signature over it from the response onward, and can land it itself.
+- **No response metadata to trust.** This scheme adds nothing scheme-specific to the response. The client checks the content it holds against the onchain `JobSubmitted` event — immediately under `escrow`, once the provider submits under `upfront` — so there is no server-authored field whose honesty it has to assume.
 - **`submittedAt` binding.** ERC-8183 binds `submittedAt` into `Complete` and `Reject` authorizations, so a pre-signed terminal action cannot be replayed against a later submission. Not an x402 operation, but the reason relayed evaluator actions would be safe if a facilitator chose to offer them.
 - **Description size.** The resolved description is stored onchain by the client's `createJob`. A long `resource.description` raises the client's gas for every job; a server SHOULD keep it to a short brief.
 

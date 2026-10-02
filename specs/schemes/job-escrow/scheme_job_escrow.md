@@ -60,11 +60,9 @@
 
 **Payment identity.** Each job has a unique network-assigned identity, funded at most once and consumed by at most one resource request.
 
-**Deliverable commitment.** The provider commits a hash of what it delivered, bound by the provider's own signature, and the client receives that commitment with the response. A network binding MUST fix the derivation of the hash from the delivered content, so that the client can recompute it from what it received and present the delivered work to the evaluator as evidence; the evaluator needs nothing else from the payment layer. The commitment identifies the provider's submitted result. Determining whether that result satisfies the job is outside the scheme: evaluators MAY use the job description, application-layer data, signed offers or receipts, TLS transcript proofs, zero-knowledge proofs, or any other evidence agreed by the parties.
+**Deliverable commitment.** A network binding MUST define a deterministic derivation of the submitted deliverable commitment from the resource content, such that the server and the client compute it over identical bytes. The provider commits that value to the network through the settlement mechanism; a client can independently derive the expected commitment from the content it received and compare it with the provider's submitted commitment. Nothing scheme-specific is returned in the response for this purpose: the committed value is on the network, and a copy of it from the server would carry no information the client lacks. Two things are kept distinct: the **submitted deliverable** is payment and job state; **proof of what was actually returned** is evaluation evidence. A mismatch between the two does not by itself establish misconduct. Establishing what content the provider actually returned is outside the payment scheme and MAY rely on evaluator or application evidence such as TLS transcript proofs, signed application receipts, application-layer evidence, zero-knowledge proofs, or other evidence agreed by the parties.
 
 **Expiry enforcement.** The job expiry, published by the server, is the absolute deadline for the active job lifecycle, including the provider's ability to submit; the client's `reclaim` opens after it. A binding MAY define an evaluation grace period after submission. `maxTimeoutSeconds` bounds the client's initial payment authorization and the funding settlement; it does not bound the later escrow lifecycle, which is governed by the job expiry. The evaluator's verdict is outside both.
-
-**The provider commits before it responds.** In every flow, the client receives the provider's signed deliverable commitment together with the delivered content, whether or not the commitment has yet landed on the network.
 
 **Replay protection.** Every role-signed operation is single-use and bound to the job it names.
 
@@ -92,7 +90,7 @@ Every `job-escrow` network binding MUST specify:
 4. **Provider price commitment** — how the server's price reaches the chain and is bound to the client's funding.
 5. **Evaluator acceptance** — how the server advertises the evaluators it accepts and how a job's evaluator is checked against that.
 6. **Policy acceptance** — how the server advertises the job-level policy (hooks or equivalent) it accepts, and how a job's policy is checked against that.
-7. **Deliverable derivation and transport** — the fixed rule deriving the commitment from the delivered content, and how the commitment is carried to the network and returned to the client.
+7. **Deliverable derivation** — the fixed rule deriving the commitment from the delivered content, and how the provider commits it to the network.
 8. **Per-operation verification and settlement** — the checks a facilitator runs, and the calls it makes.
 9. **Expiry, timeout, and grace** — how `maxTimeoutSeconds` bounds the client's initial payment authorization and funding settlement, how the absolute job expiry bounds subsequent lifecycle operations, and any evaluation grace period.
 10. **Out-of-band claim activity** — how claim settlement on the underlying job, where the escrow supports it, interacts with the client's expiry refund.

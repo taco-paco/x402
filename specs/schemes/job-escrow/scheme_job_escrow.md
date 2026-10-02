@@ -2,7 +2,7 @@
 
 ## Summary
 
-`job-escrow` is a payment scheme in which the client funds a **job** into escrow, the resource server delivers and commits to a **deliverable**, and an **evaluator** — never the resource server itself — releases the escrow to the server or returns it to the client. Where `auth-capture` lets the payee's operator decide when to take held funds, `job-escrow` is for payments whose release the client will not leave to the payee: within the scheme, the payee can only submit work, and only a third party the client named in the job can pay it out.
+`job-escrow` is a payment scheme in which the client funds a **job** into escrow, the resource server delivers and commits to a **deliverable**, and an **evaluator** — never the resource server itself — releases the escrow to the server or returns it to the client. Where `auth-capture` lets the payee's operator decide when to take held funds, `job-escrow` is for payments whose release the client will not leave to the payee: within the scheme, the payee can only submit work, and only the evaluator the client named in the job — an address distinct from the payee, which MAY be the client itself — can pay it out.
 
 ## Example use cases
 
@@ -44,11 +44,13 @@
 
 ## Core properties
 
-**Fund safety.** The amount escrowed is exactly the client-authorized budget. Within the x402 lifecycle, funds leave escrow only to the provider (on completion) or to the client (on rejection or expiry). No party can direct them elsewhere, and the facilitator cannot move them at all.
+**Fund safety.** The amount escrowed is exactly the client-authorized budget. Within the x402 lifecycle, funds leave escrow only to the provider-side payout recipient selected by the provider (on completion), or return to the client (on rejection or expiry). The facilitator cannot select or alter either destination.
 
-**Third-party release.** Within the x402 lifecycle, the provider cannot release its own payment. The address that releases is fixed in the client-created job and MUST differ from the provider.
+**Evaluator-controlled release.** Within the x402 lifecycle, the provider cannot release its own payment. The evaluator named in the client-created job controls terminal completion or rejection and MUST differ from the provider. The evaluator MAY be the client.
 
-**Scope of the scheme.** `job-escrow` does not expose ERC-8183 claim-settlement operations. Within the x402 lifecycle, funds are released only through terminal evaluation. Parties MAY use claim settlement out of band; if they do, terminal completion, rejection, and expiry apply to the remaining unsettled budget, and the properties above hold for that remainder.
+**Scope of the scheme.** `job-escrow` does not expose ERC-8183 claim-settlement operations. Within the x402 lifecycle, funds are released only through terminal evaluation. Parties MAY use claim settlement out of band; if they do, terminal completion, rejection, and expiry apply to the remaining unsettled budget, and the properties above hold for that remainder. A network binding MUST state how out-of-band claim activity interacts with the client's expiry refund, since a pending claim can delay it.
+
+**What the second settle finalizes.** Under `escrow`, the first settle fixes the amount — the full budget, with no partial release in the scheme — and the second fixes the deliverable. Together they determine everything a payment flow can determine for this scheme; the evaluator's verdict that follows is adjudication of the delivered work, outside the payment protocol in the way a chargeback is outside a card authorization. This is the sense in which the second settle is `escrow`'s "final charge".
 
 **Provider protection.** Once funded, the client cannot withdraw before the job's expiry. The provider is protected for the whole delivery window it agreed to.
 
@@ -58,9 +60,11 @@
 
 **Payment identity.** Each job has a unique network-assigned identity, funded at most once and consumed by at most one resource request.
 
-**Deliverable commitment.** The provider commits a hash of what it delivered, and the client receives that commitment with the response, together with the method that produced it. The client can therefore recompute the commitment from what it received, and present the delivered work and the method to the evaluator as evidence; the evaluator needs nothing else from the payment layer. The commitment identifies the provider's submitted result. Determining whether that result satisfies the job is outside the scheme: evaluators MAY use the job description, application-layer data, signed offers or receipts, TLS transcript proofs, zero-knowledge proofs, or any other evidence agreed by the parties.
+**Deliverable commitment.** The provider commits a hash of what it delivered, bound by the provider's own signature, and the client receives that commitment with the response. A network binding MUST fix the derivation of the hash from the delivered content, so that the client can recompute it from what it received and present the delivered work to the evaluator as evidence; the evaluator needs nothing else from the payment layer. The commitment identifies the provider's submitted result. Determining whether that result satisfies the job is outside the scheme: evaluators MAY use the job description, application-layer data, signed offers or receipts, TLS transcript proofs, zero-knowledge proofs, or any other evidence agreed by the parties.
 
-**Expiry enforcement.** A single absolute expiry bounds funding, submission, and the client's `reclaim`. The server publishes a floor (`extra.jobExpiresAt`); the client MAY set a later one. A binding MAY add an evaluation grace period after it.
+**Expiry enforcement.** The job expiry, published by the server, is the absolute deadline for the active job lifecycle, including the provider's ability to submit; the client's `reclaim` opens after it. A binding MAY define an evaluation grace period after submission. `maxTimeoutSeconds` bounds the client's initial payment authorization and the funding settlement; it does not bound the later escrow lifecycle, which is governed by the job expiry. The evaluator's verdict is outside both.
+
+**The provider commits before it responds.** In every flow, the client receives the provider's signed deliverable commitment together with the delivered content, whether or not the commitment has yet landed on the network.
 
 **Replay protection.** Every role-signed operation is single-use and bound to the job it names.
 
@@ -68,7 +72,7 @@
 
 | Aspect | `auth-capture` | `job-escrow` |
 | --- | --- | --- |
-| Who releases to the payee | the operator (payee-side) | the evaluator (third party) |
+| Who releases to the payee | the operator (payee-side) | the evaluator (distinct from the payee) |
 | Payee's own release path | `capture` up to the hold | none within the scheme |
 | Partial release | `capture` any amount | none within the scheme (see Appendix: claim settlement) |
 | Facilitator's power | is or emulates the operator | none — relays role-signed calls only |
@@ -82,15 +86,16 @@
 
 Every `job-escrow` network binding MUST specify:
 
-1. **Escrow contract** — the job primitive, its state machine, and how each role is authenticated.
+1. **Escrow contract profile** — the job primitive, its state machine, how each role is authenticated, and the exact contract surface the binding depends on, since ERC-8183 leaves hooks, grace periods, claim settlement, and administration to implementations.
 2. **Job creation** — what the client submits to create the job, and which offered terms it MUST carry into it.
 3. **Client authorization format** — the payload the client produces to fund the job it created.
 4. **Provider price commitment** — how the server's price reaches the chain and is bound to the client's funding.
 5. **Evaluator acceptance** — how the server advertises the evaluators it accepts and how a job's evaluator is checked against that.
 6. **Policy acceptance** — how the server advertises the job-level policy (hooks or equivalent) it accepts, and how a job's policy is checked against that.
-7. **Deliverable transport** — how the commitment and its method are carried to the network and returned to the client, and which methods the binding defines.
+7. **Deliverable derivation and transport** — the fixed rule deriving the commitment from the delivered content, and how the commitment is carried to the network and returned to the client.
 8. **Per-operation verification and settlement** — the checks a facilitator runs, and the calls it makes.
-9. **Expiry and grace** — how `jobExpiresAt` maps onchain and any evaluation grace period.
+9. **Expiry, timeout, and grace** — how `maxTimeoutSeconds` bounds the client's initial payment authorization and funding settlement, how the absolute job expiry bounds subsequent lifecycle operations, and any evaluation grace period.
+10. **Out-of-band claim activity** — how claim settlement on the underlying job, where the escrow supports it, interacts with the client's expiry refund.
 
 ### Claim settlement (future)
 

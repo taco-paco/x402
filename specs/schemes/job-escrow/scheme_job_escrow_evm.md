@@ -4,7 +4,7 @@
 
 This is the EVM binding of [`job-escrow`](./scheme_job_escrow.md). It specifies the contract profile, wire fields, signatures, and facilitator logic that realize the scheme on EVM chains.
 
-The binding builds on [ERC-8183](https://eips.ethereum.org/EIPS/eip-8183) with its Signed Authorizations extension. The client creates the job with a direct `createJob` call; every later operation is a `*WithAuthorization` entry point, where the contract verifies an EIP-712 signature from the acting role and executes the core function **with the signer as the acting party**. The facilitator is `msg.sender` of nothing that matters — it pays gas and holds no role.
+This binding builds on [ERC-8183](https://eips.ethereum.org/EIPS/eip-8183), but targets the contract surface provided by the ERC-8183 project's [reference implementation](https://github.com/erc-8183/base-contracts). The published EIP describes gasless execution through an ERC-2771 trusted forwarder, while the reference implementation also provides a Signed Authorizations extension with role-specific `*WithAuthorization` entry points. This binding uses the latter: the client creates the job with a direct `createJob` call, and facilitator-relayed operations are authorized by EIP-712 signatures from the corresponding job role. The facilitator pays gas but holds no role in the job.
 
 There is no canonical deployment. ERC-8183 is a Draft standard that leaves hooks, grace periods, claim settlement, and administration to implementations, so this binding pins the surface it depends on as an [escrow profile](#escrow-profile). A facilitator advertises the escrows it relays for, each with its profile, in `/supported`; a server MUST name one of them in `extra.escrow`.
 
@@ -64,6 +64,8 @@ sequenceDiagram
 ```
 
 ## Escrow profile
+
+`job-escrow-evm-1` pins Signed Authorizations as its authorization and relay mechanism. This is a choice of the EVM profile rather than a property of the `job-escrow` scheme itself: a future profile may realize the same ERC-8183 core role operations through another mechanism, such as ERC-2771. Such alternatives can be advertised as distinct `accepts[]` entries and use the payload format required by the selected mechanism.
 
 A facilitator relays only into escrows it has admitted, and admission is against a **profile**: the contract surface this binding calls and reads. This version defines one profile, `job-escrow-evm-1`. The ERC-8183 reference implementation satisfies it.
 
@@ -162,7 +164,7 @@ The two are related only when the offer is constructed: a server MUST publish `j
 
 ### Job description
 
-ERC-8183 stores a `description` on every job — "a job brief, scope reference" — set by the client at creation. This binding takes it from the 402 rather than defining a field of its own: the job description is `resource.description` of the `PaymentRequired` (the core [`ResourceInfo`](../../x402-specification-v2.md#5-types) field, "human-readable description of the resource"), and when the server publishes none, `accepts[].extra.description`, which is then REQUIRED. The client MUST pass the resolved value verbatim to `createJob`, and the facilitator checks its hash at settlement. It is the brief the evaluator will judge against, so it SHOULD state what the resource delivers in terms a human or an evaluator can check. It is stored onchain at the client's gas cost, so a server SHOULD keep it short, and MAY point to fuller terms by URI within it.
+ERC-8183 stores a description on every job — "a job brief, scope reference" — set by the client at creation. This binding takes it from the 402 rather than defining a field of its own: the job description is resource.description of the `PaymentRequired` (the core ResourceInfo field, "human-readable description of the resource"), and when the server publishes none, `accepts[].extra.description`, which is then REQUIRED. The client MUST pass the resolved value verbatim to createJob, so server SHOULD keep it concise.
 
 ### Evaluators
 

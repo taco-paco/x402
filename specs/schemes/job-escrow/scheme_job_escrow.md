@@ -52,7 +52,7 @@
 
 **What the second settle finalizes.** Under `escrow`, the first settle fixes the amount — the full budget, with no partial release in the scheme — and the second fixes the deliverable. Together they determine everything a payment flow can determine for this scheme; the evaluator's verdict that follows is adjudication of the delivered work, outside the payment protocol in the way a chargeback is outside a card authorization. This is the sense in which the second settle is `escrow`'s "final charge".
 
-**Provider protection.** Once funded, the client cannot withdraw before the job's expiry. The provider is protected for the whole delivery window it agreed to.
+**Provider protection.** Once funded, there is no client-role withdrawal path before expiry. Before expiry, funds move only through evaluator-controlled completion or rejection.
 
 **No stranding before funding.** A job that is created but not funded holds nothing. Either the client or the provider can close it at any time before funding; the server SHOULD close a job it refuses.
 
